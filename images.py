@@ -27,6 +27,16 @@ WIKI_PASSWORD = os.environ.get("WIKI_PASSWORD")
 MITM_ROOT = os.environ.get("MITM_ROOT")
 
 class WikiImages(object):
+    # Map of item upload types to CDN path segments
+    ITEM_SINGLE_TYPE_PATHS = {
+        "article": "article",
+        "normal": "normal",
+        "recycling": "recycling",
+        "skillplus": "skillplus",
+        "evolution": "evolution",
+        "npcaugment": "npcaugment",
+    }
+
     def __init__(self):
         """
         Initialize wiki connection and DB.
@@ -279,7 +289,7 @@ class WikiImages(object):
                 return False
             if response['result'] == 'Warning':
                 return False
-            return true_name
+            return True
 
     def investigate_backlinks(self, backlinks, source, target):
         print('Investigating "{0}" backlinks...'.format(source))
@@ -407,13 +417,17 @@ class WikiImages(object):
                 print('Ignoring extra max index argument for single status upload.')
             indices = [None]
 
+        def emit_status(stage, **kwargs):
+            if hasattr(self, '_status_callback'):
+                self._status_callback(stage, **kwargs)
+
         def status_download_and_upload(identifier, report_missing=True):
             url = url_template.format(identifier)
             success, sha1, size, io = self.get_image(url)
             if not success:
                 if report_missing:
                     print(f'Skipping {identifier}.png (download failed).')
-                return False
+                return False, None
 
             true_name = f'{identifier}.png'
             other_names = []
@@ -421,7 +435,7 @@ class WikiImages(object):
 
             if check_image_result is False:
                 print(f'Checking image {true_name} failed! Skipping...')
-                return False
+                return False, None
             elif check_image_result is not True:
                 true_name = check_image_result
 
@@ -430,30 +444,225 @@ class WikiImages(object):
 
             time.sleep(self.delay)
             self.check_file_double_redirect(true_name)
-            return True
+            return True, true_name
+
+        total = len(indices)
+        processed = 0
+        uploaded = 0
+        failed = 0
+
+        emit_status(
+            "processing",
+            processed=processed,
+            uploaded=uploaded,
+            failed=failed,
+            total=total,
+            current_identifier=None,
+        )
 
         for index in indices:
+            current_identifier = base_identifier
+            success = False
+            final_name = None
+
             if index is None:
-                identifier = base_identifier
-                status_download_and_upload(identifier)
-                continue
+                success, final_name = status_download_and_upload(base_identifier)
+            else:
+                primary_identifier = f'{base_identifier}_{index}'
+                success, final_name = status_download_and_upload(primary_identifier, report_missing=False)
+                if success:
+                    current_identifier = primary_identifier
+                else:
+                    secondary_identifier = f'{base_identifier}{index}'
+                    current_identifier = secondary_identifier
+                    success, final_name = status_download_and_upload(secondary_identifier, report_missing=False)
+                    if not success:
+                        print(
+                            f'No status icon found for index {index} '
+                            f'({primary_identifier}.png or {secondary_identifier}.png).'
+                        )
 
-            primary_identifier = f'{base_identifier}_{index}'
-            if status_download_and_upload(primary_identifier, report_missing=False):
-                continue
+            processed += 1
+            if success:
+                uploaded += 1
+            else:
+                failed += 1
 
-            secondary_identifier = f'{base_identifier}{index}'
-            if status_download_and_upload(secondary_identifier, report_missing=False):
-                continue
+            emit_kwargs = {
+                "processed": processed,
+                "uploaded": uploaded,
+                "failed": failed,
+                "total": total,
+                "current_identifier": current_identifier,
+            }
+            if success and final_name:
+                emit_kwargs["downloaded_file"] = final_name
 
-            print(
-                f'No status icon found for index {index} '
-                f'({primary_identifier}.png or {secondary_identifier}.png).'
-            )
+            emit_status("processing", **emit_kwargs)
+
+        emit_status(
+            "completed",
+            processed=processed,
+            uploaded=uploaded,
+            failed=failed,
+            total=total,
+            current_identifier=None,
+        )
+
+    def upload_gacha_banners(self, banner_identifier, max_index=12):
+        """
+        Upload gacha banner images from the GBF CDN to the wiki.
+
+        Args:
+            banner_identifier (str): Text between `banner_` and the trailing index in the CDN file name.
+            max_index (int): Highest sequential index to attempt. Defaults to 12.
+        """
+        if not banner_identifier:
+            print('Banner identifier is required.')
+            return
+
+        if max_index is None:
+            max_index = 12
+
+        try:
+            max_index = int(max_index)
+        except (TypeError, ValueError):
+            print(f'Invalid maximum index "{max_index}" provided.')
+            return
+
+        if max_index < 1:
+            print('Maximum index must be at least 1.')
+            return
+
+        def emit_status(stage, **kwargs):
+            if hasattr(self, '_status_callback'):
+                self._status_callback(stage, **kwargs)
+
+        base_url = (
+            'https://prd-game-a-granbluefantasy.akamaized.net/assets_en/'
+            'img/sp/banner/gacha/{0}'
+        )
+
+        total = max_index
+        processed = 0
+        uploaded = 0
+        failed = 0
+
+        emit_status(
+            "processing",
+            processed=processed,
+            uploaded=uploaded,
+            failed=failed,
+            total=total,
+            current_identifier=None,
+        )
+
+        for index in range(1, max_index + 1):
+            file_name = f'banner_{banner_identifier}_{index}.png'
+            url = base_url.format(file_name)
+            print(f'Downloading {url}...')
+            success, sha1, size, io_obj = self.get_image(url)
+
+            current_identifier = file_name
+            final_name = None
+            if not success:
+                print(f'No gacha banner found for index {index} ({file_name}).')
+                failed += 1
+            else:
+                other_names = []
+                check_result = self.check_image(file_name, sha1, size, io_obj, other_names)
+                if check_result is False:
+                    print(f'Checking image {file_name} failed! Skipping...')
+                    failed += 1
+                else:
+                    final_name = file_name if check_result is True else check_result
+                    for other_name in other_names:
+                        self.check_file_redirect(final_name, other_name)
+                    time.sleep(self.delay)
+                    self.check_file_double_redirect(final_name)
+                    uploaded += 1
+
+            processed += 1
+
+            emit_kwargs = {
+                "processed": processed,
+                "uploaded": uploaded,
+                "failed": failed,
+                "total": total,
+                "current_identifier": current_identifier,
+            }
+            if final_name:
+                emit_kwargs["downloaded_file"] = final_name
+
+            emit_status("processing", **emit_kwargs)
+
+        emit_status(
+            "completed",
+            processed=processed,
+            uploaded=uploaded,
+            failed=failed,
+            total=total,
+            current_identifier=None,
+        )
+
+    def _process_item_variant(self, item_type, item_id, item_name, variant, redirect_suffix):
+        """
+        Download and upload a single item variant image for the given CDN item type.
+
+        Returns:
+            tuple[str, int, int]: Final image name (or attempted canonical name on failure),
+            upload count increment, duplicate count increment.
+        """
+        item_type = item_type.lower()
+        path_segment = self.ITEM_SINGLE_TYPE_PATHS.get(item_type)
+        if not path_segment:
+            raise ValueError(f'Unsupported single-item upload type "{item_type}".')
+
+        url = (
+            'https://prd-game-a-granbluefantasy.akamaized.net/assets_en/'
+            f'img/sp/assets/item/{path_segment}/{variant}/{item_id}.jpg'
+        )
+        true_name = f'item_{item_type}_{variant}_{item_id}.jpg'
+        other_names = [f'{item_name} {redirect_suffix}.jpg']
+
+        print(
+            f'Downloading {url} for item "{item_name}" '
+            f'(type: {item_type}, variant: {variant}, ID: {item_id})...'
+        )
+        success, sha1, size, io_obj = self.get_image(url)
+        if not success:
+            print(f'Failed to download item image for ID {item_id} variant {variant} ({item_type}).')
+            return true_name, 0, 0
+
+        check_image_result = self.check_image(true_name, sha1, size, io_obj, other_names)
+        if check_image_result is False:
+            print(f'Upload validation failed for {true_name}.')
+            return true_name, 0, 0
+
+        if check_image_result is True:
+            final_name = true_name
+            uploaded_increment = 1
+            duplicate_increment = 0
+        else:
+            final_name = check_image_result
+            uploaded_increment = 0
+            duplicate_increment = 1
+
+        for other_name in other_names:
+            self.check_file_redirect(final_name, other_name)
+
+        time.sleep(self.delay)
+        self.check_file_double_redirect(final_name)
+
+        return final_name, uploaded_increment, duplicate_increment
+
+    def _process_item_article_variant(self, item_id, item_name, variant, redirect_suffix):
+        """Backward-compatible wrapper for article item uploads."""
+        return self._process_item_variant("article", item_id, item_name, variant, redirect_suffix)
 
     def upload_item_article_images(self, page):
         """
-        Upload item article images for each {{Item}} template found on a page.
+        Upload item images for each {{Item}} template found on a page.
 
         Args:
             page (mwclient.page.Page): Wiki page containing {{Item}} templates.
@@ -473,6 +682,7 @@ class WikiImages(object):
 
             item_id = None
             item_name = None
+            item_type = 'article'
 
             for param in template.params:
                 param_name = param.name.strip()
@@ -485,6 +695,8 @@ class WikiImages(object):
                     item_id = value
                 elif param_name == 'name' and value:
                     item_name = mwparserfromhell.parse(value).strip_code().strip()
+                elif param_name == 'item_type' and value:
+                    item_type = mwparserfromhell.parse(value).strip_code().strip().lower()
 
             if not item_id:
                 print('Skipping template without id parameter.')
@@ -498,8 +710,13 @@ class WikiImages(object):
                 print(f'Skipping item id "{item_id}" without name parameter.')
                 continue
 
+            item_type = (item_type or 'article').lower()
+            if item_type not in self.ITEM_SINGLE_TYPE_PATHS:
+                print(f'Skipping item id "{item_id}" with unsupported type "{item_type}".')
+                continue
+
             seen_ids.add(item_id)
-            items.append({'id': item_id, 'name': item_name})
+            items.append({'id': item_id, 'name': item_name, 'type': item_type})
 
         if not items:
             print('No valid {{Item}} templates found.')
@@ -513,67 +730,24 @@ class WikiImages(object):
         for item in items:
             item_id = item['id']
             item_name = item['name']
+            item_type = item['type']
 
             for variant, redirect_suffix in [('s', 'square'), ('m', 'icon')]:
-                url = (
-                    'https://prd-game-a-granbluefantasy.akamaized.net/assets_en/'
-                    f'img/sp/assets/item/article/{variant}/{item_id}.jpg'
+                current_image, uploaded_increment, duplicate_increment = self._process_item_variant(
+                    item_type, item_id, item_name, variant, redirect_suffix
                 )
-                true_name = f'item_article_{variant}_{item_id}.jpg'
-                other_names = [f'{item_name} {redirect_suffix}.jpg']
-
-                print(f'Downloading {url} for item "{item_name}" (ID: {item_id})...')
-                success, sha1, size, io_obj = self.get_image(url)
-                if not success:
-                    print(f'Failed to download item image for ID {item_id} variant {variant}.')
-                    processed_variants += 1
-                    if hasattr(self, '_status_callback'):
-                        self._status_callback(
-                            "processing",
-                            processed=processed_variants,
-                            total=total_variants,
-                            current_image=true_name,
-                        )
-                    continue
-
-                check_image_result = self.check_image(true_name, sha1, size, io_obj, other_names)
-                if check_image_result is False:
-                    print(f'Upload validation failed for {true_name}.')
-                    processed_variants += 1
-                    if hasattr(self, '_status_callback'):
-                        self._status_callback(
-                            "processing",
-                            processed=processed_variants,
-                            total=total_variants,
-                            current_image=true_name,
-                        )
-                    continue
-
-                if check_image_result is True:
-                    final_name = true_name
-                else:
-                    final_name = check_image_result
-
-                if final_name.lower() == true_name.lower():
-                    successful_uploads += 1
-                else:
-                    duplicate_matches += 1
-
-                true_name = final_name
-
-                for other_name in other_names:
-                    self.check_file_redirect(true_name, other_name)
-
-                time.sleep(self.delay)
-                self.check_file_double_redirect(true_name)
 
                 processed_variants += 1
+                successful_uploads += uploaded_increment
+                duplicate_matches += duplicate_increment
+
                 if hasattr(self, '_status_callback'):
                     self._status_callback(
                         "processing",
                         processed=processed_variants,
                         total=total_variants,
-                        current_image=true_name,
+                        current_image=current_image,
+                        item_type=item_type,
                     )
 
         if hasattr(self, '_status_callback'):
@@ -583,7 +757,72 @@ class WikiImages(object):
                 uploaded=successful_uploads,
                 duplicates=duplicate_matches,
                 total_urls=total_variants,
+                item_type=None,
             )
+
+    def upload_single_item_images(self, item_type, item_id, item_name):
+        """
+        Upload item images for a single CDN item category using its id and display name.
+
+        Args:
+            item_type (str): CDN path segment (e.g. article, normal, recycling).
+            item_id (str): Unique identifier for the item on the CDN.
+            item_name (str): Display name to use for redirect creation.
+        """
+        item_type = str(item_type).strip().lower()
+        if item_type not in self.ITEM_SINGLE_TYPE_PATHS:
+            print(f'Unsupported item type "{item_type}" for single item upload.')
+            return
+
+        item_id = str(item_id).strip()
+        item_name = mwparserfromhell.parse(item_name).strip_code().strip()
+
+        if not item_id:
+            print('Item id is required for single item upload.')
+            return
+
+        if not item_name:
+            print('Item name is required for single item upload.')
+            return
+
+        print(f'Processing single item "{item_name}" (type: {item_type}, ID: {item_id})...')
+
+        total_variants = 2  # s and m variants
+        processed_variants = 0
+        successful_uploads = 0
+        duplicate_matches = 0
+
+        for variant, redirect_suffix in [('s', 'square'), ('m', 'icon')]:
+            current_image, uploaded_increment, duplicate_increment = self._process_item_variant(
+                item_type, item_id, item_name, variant, redirect_suffix
+            )
+
+            processed_variants += 1
+            successful_uploads += uploaded_increment
+            duplicate_matches += duplicate_increment
+
+            if hasattr(self, '_status_callback'):
+                self._status_callback(
+                    "processing",
+                    processed=processed_variants,
+                    total=total_variants,
+                    current_image=current_image,
+                    item_type=item_type,
+                )
+
+        if hasattr(self, '_status_callback'):
+            self._status_callback(
+                "completed",
+                processed=processed_variants,
+                uploaded=successful_uploads,
+                duplicates=duplicate_matches,
+                total_urls=total_variants,
+                item_type=item_type,
+            )
+
+    def upload_single_item_article_images(self, item_id, item_name):
+        """Backward-compatible wrapper for article single-item uploads."""
+        self.upload_single_item_images("article", item_id, item_name)
 
     def check_character(self, page):
         paths = {
@@ -1726,8 +1965,8 @@ class WikiImages(object):
             ),
             lambda variant, gender, alias: [
                 f'leader_p_{variant["id_num"]}_{gender}_01.png',
-                *([f'{class_data["name"]}_{alias}_party.png'] if not variant['is_lvl50'] else []),
-                *([f'{class_data["name"]}_{alias}_party_lvl50.png'] if variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_party.png'] if not variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_party2.png'] if variant['is_lvl50'] else []),
             ],
             extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
         )
@@ -1745,7 +1984,7 @@ class WikiImages(object):
             lambda variant, gender, alias: [
                 f'leader_jobon_z_{variant["id_num"]}_{gender}_01.png',
                 *([f'{class_data["name"]}_{alias}_jobon_z.png'] if not variant['is_lvl50'] else []),
-                *([f'{class_data["name"]}_{alias}_jobon_z_lvl50.png'] if variant['is_lvl50'] else []),
+                *([f'{class_data["name"]}_{alias}_jobon_z2.png'] if variant['is_lvl50'] else []),
             ],
             extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
         )
@@ -1819,7 +2058,7 @@ class WikiImages(object):
                 lambda variant, gender, alias: [
                     f'leader_pm_{variant["id_num"]}_{gender}_01.png',
                     *([f'{class_data["name"]}_{alias}_profile.png'] if not variant['is_lvl50'] else []),
-                    *([f'{class_data["name"]}_{alias}_profile_lvl50.png'] if variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_profile2.png'] if variant['is_lvl50'] else []),
                 ],
                 extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
             )
@@ -1837,7 +2076,7 @@ class WikiImages(object):
                 lambda variant, gender, alias: [
                     f'leader_raid_log_{variant["id_num"]}_{gender}_01.png',
                     *([f'{class_data["name"]}_{alias}_raid_log.png'] if not variant['is_lvl50'] else []),
-                    *([f'{class_data["name"]}_{alias}_raid_log_lvl50.png'] if variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_raid_log2.png'] if variant['is_lvl50'] else []),
                 ],
                 extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
             )
@@ -1857,7 +2096,7 @@ class WikiImages(object):
                 lambda variant, gender, alias: [
                     f'leader_quest_{variant["id_num"]}_{gender}_01.jpg',
                     *([f'{class_data["name"]}_{alias}_quest.png'] if not variant['is_lvl50'] else []),
-                    *([f'{class_data["name"]}_{alias}_quest_lvl50.png'] if variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_quest2.png'] if variant['is_lvl50'] else []),
                 ],
                 extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
             )
@@ -1877,7 +2116,7 @@ class WikiImages(object):
                 lambda variant, gender, alias: [
                     f'leader_coop_{variant["id_num"]}_{gender}_01.png',
                     *([f'{class_data["name"]}_{alias}_coop.png'] if not variant['is_lvl50'] else []),
-                    *([f'{class_data["name"]}_{alias}_coop_lvl50.png'] if variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_coop2.png'] if variant['is_lvl50'] else []),
                 ],
                 extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
             )
@@ -1897,7 +2136,23 @@ class WikiImages(object):
                 lambda variant, gender, alias: [
                     f'leader_btn_{variant["id_num"]}_{gender}_01.png',
                     *([f'{class_data["name"]}_{alias}_btn.png'] if not variant['is_lvl50'] else []),
-                    *([f'{class_data["name"]}_{alias}_btn_lvl50.png'] if variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_btn2.png'] if variant['is_lvl50'] else []),
+                ],
+                extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
+            )
+
+            hd_variants = build_variants(
+                'HD image',
+                include_lvl50=supports_lvl50_assets,
+                lvl50_label='HD (Lv50) image',
+            )
+            process_gendered_assets(
+                hd_variants,
+                lambda variant, gender: f'https://media.skycompass.io/assets/customizes/jobs/1138x1138/{variant["id_num"]}_{gender}.png',
+                lambda variant, gender: f'jobs_1138x1138_{variant["id_num"]}_{gender}.png',
+                lambda variant, gender, alias: [
+                    *([f'{class_data["name"]} {alias} HD.png'] if not variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]} {alias} HD2.png'] if variant['is_lvl50'] else []),
                 ],
                 extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
             )
@@ -1921,8 +2176,8 @@ class WikiImages(object):
                         f'{class_data["name"]}_{alias}_my.png',
                     ] if not variant['is_lvl50'] else []),
                     *([
-                        f'{class_data["name"]}_{alias}_homescreen_lvl50.png',
-                        f'{class_data["name"]}_{alias}_my_lvl50.png',
+                        f'{class_data["name"]}_{alias}_homescreen2.png',
+                        f'{class_data["name"]}_{alias}_my2.png',
                     ] if variant['is_lvl50'] else []),
                 ],
                 extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
@@ -1943,7 +2198,7 @@ class WikiImages(object):
                 lambda variant, gender, alias: [
                     f'leader_zenith_{variant["id_num"]}_{gender}_01.png',
                     *([f'{class_data["name"]}_{alias}_zenith.png'] if not variant['is_lvl50'] else []),
-                    *([f'{class_data["name"]}_{alias}_zenith_lvl50.png'] if variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_zenith2.png'] if variant['is_lvl50'] else []),
                 ],
                 extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
             )
@@ -1962,7 +2217,7 @@ class WikiImages(object):
                 lambda variant, gender: f'leader_t_{variant["id_num"]}_{variant["abbr"]}_{gender}_01.png',
                 lambda variant, gender, alias: [
                     f'leader_t_{variant["id_num"]}_{gender}_01.png',
-                    *([f'{class_data["name"]}_{alias}_babyl_lvl50.png'] if variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_babyl2.png'] if variant['is_lvl50'] else []),
                 ],
                 extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
             )
@@ -1985,21 +2240,21 @@ class WikiImages(object):
                 include_lvl50=supports_lvl50_assets,
                 lvl50_label='square (Lv50) image',
             )
-        process_gendered_assets(
-            square_variants,
-            lambda variant, gender: (
-                'https://prd-game-a-granbluefantasy.akamaized.net/assets_en/'
-                f'img/sp/assets/leader/s/{variant["id"]}_{gender}_01.jpg'
-            ),
-            lambda variant, gender: f'leader_s_{variant["id_num"]}_{variant["abbr"]}_{gender}_01.jpg',
-            lambda variant, gender, alias: [
-                f'leader_s_{variant["id_num"]}_{gender}_01.jpg',
-                f'{class_data["name"]}_{alias}_square.jpg',
-                *([f'{class_data["name"]}_{alias}_square_lvl50.jpg'] if variant['is_lvl50'] else []),
-            ],
-            adjust_attempts_for_failures=True,
-            extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
-        )
+            process_gendered_assets(
+                square_variants,
+                lambda variant, gender: (
+                    'https://prd-game-a-granbluefantasy.akamaized.net/assets_en/'
+                    f'img/sp/assets/leader/s/{variant["id"]}_{gender}_01.jpg'
+                ),
+                lambda variant, gender: f'leader_s_{variant["id_num"]}_{variant["abbr"]}_{gender}_01.jpg',
+                lambda variant, gender, alias: [
+                    f'leader_s_{variant["id_num"]}_{gender}_01.jpg',
+                    *([f'{class_data["name"]}_{alias}_square.jpg'] if not variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_square_lvl50.jpg'] if variant['is_lvl50'] else []),
+                ],
+                adjust_attempts_for_failures=True,
+                extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
+            )
 
         if has_class_fields('id_num', 'name'):
             process_single_asset(
@@ -2204,6 +2459,27 @@ def main():
             return
         page_name = sys.argv[2]
         wi.upload_item_article_images(wi.wiki.pages[page_name])
+    elif mode == 'singleitem':
+        if len(sys.argv) < 5:
+            print('Usage: python images.py singleitem <item_type> <item_id> <item_name>')
+            print(
+                'Supported item types: '
+                + ', '.join(sorted(wi.ITEM_SINGLE_TYPE_PATHS.keys()))
+            )
+            return
+        item_type = sys.argv[2].lower()
+        if item_type not in wi.ITEM_SINGLE_TYPE_PATHS:
+            print(
+                f'Unsupported item type "{item_type}". '
+                f'Supported types: {", ".join(sorted(wi.ITEM_SINGLE_TYPE_PATHS.keys()))}'
+            )
+            return
+        item_id = sys.argv[3]
+        item_name = ' '.join(sys.argv[4:]).strip()
+        if not item_id or not item_name:
+            print('Item id and item name are required for single item upload.')
+            return
+        wi.upload_single_item_images(item_type, item_id, item_name)
     elif mode == 'summon':
         wi.check_summon(wi.wiki.pages[sys.argv[2]])
     elif mode == 'summons':
