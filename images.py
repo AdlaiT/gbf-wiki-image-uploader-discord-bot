@@ -1894,7 +1894,7 @@ class WikiImages(object):
                 sprite_variants,
                 lambda variant, gender: (
                     'https://prd-game-a-granbluefantasy.akamaized.net/assets_en/'
-                    f'img/sp/assets/leader/sd/{variant["id"]}_{variant["abbr"]}_{gender}_01.png'
+                    f'img/sp/assets/leader/sd/{variant["id"]}_{gender}_01.png'
                 ),
                 lambda variant, gender: (
                     f'leader_sd_{variant["id_num"]}_{variant["abbr"]}_{gender}_01.png'
@@ -2019,10 +2019,13 @@ class WikiImages(object):
             lambda variant, gender, alias: [
                 f'leader_result_ml_{variant["id_num"]}_{gender}_01.jpg',
                 *([f'{class_data["name"]}_{alias}_result_ml.jpg'] if not variant['is_lvl50'] else []),
-                *([f'{class_data["name"]}_{alias}_result_ml_lvl50.jpg'] if variant['is_lvl50'] else []),
+                *([f'{class_data["name"]}_{alias}_result_ml2.jpg'] if variant['is_lvl50'] else []),
             ],
             extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
         )
+        if has_class_fields('id', 'id_num', 'abbr', 'name'):
+            result_variants = build_variants('result image', include_lvl50=True, lvl50_label='result (Lv50) image')
+
         if has_class_fields('id', 'id_num', 'abbr', 'name'):
             result_variants = build_variants('result image', include_lvl50=True, lvl50_label='result (Lv50) image')
             process_gendered_assets(
@@ -2037,7 +2040,7 @@ class WikiImages(object):
                 lambda variant, gender, alias: [
                     f'leader_result_{variant["id_num"]}_{gender}_01.jpg',
                     *([f'{class_data["name"]}_{alias}_result.jpg'] if not variant['is_lvl50'] else []),
-                    *([f'{class_data["name"]}_{alias}_result_lvl50.jpg'] if variant['is_lvl50'] else []),
+                    *([f'{class_data["name"]}_{alias}_result2.jpg'] if variant['is_lvl50'] else []),
                 ],
                 extra_categories_builder=lambda variant, gender, alias: get_gender_categories(alias),
             )
